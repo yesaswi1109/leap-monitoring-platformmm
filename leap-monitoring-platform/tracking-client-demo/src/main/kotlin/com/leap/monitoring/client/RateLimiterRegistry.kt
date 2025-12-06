@@ -32,12 +32,12 @@ class RateLimiterRegistry(
 
 @Configuration
 @ConfigurationProperties(prefix = "monitoring.ratelimit")
-data class RateLimitProperties @ConstructorBinding constructor(
-    val defaultLimitPerSecond: Int = 100, 
-    val overrides: List<ServiceRateLimit> = emptyList()
-)
+class RateLimitProperties {
+    var defaultLimitPerSecond: Int = 100
+    var overrides: MutableList<ServiceRateLimit> = mutableListOf()
+}
 
 data class ServiceRateLimit(
-    val service: String,
-    val limit: Int
+    var service: String = "",
+    var limit: Int = 100
 )

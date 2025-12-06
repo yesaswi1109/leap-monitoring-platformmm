@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.*
 
 @RestController
 @RequestMapping("/api/v1")
+@CrossOrigin(origins = ["*"])
 class CollectorController(
     private val collectorService: CollectorService
 ) {
@@ -21,6 +22,11 @@ class CollectorController(
     @GetMapping("/logs")
     fun getAllLogs(): List<LogEntry> {
         return collectorService.getAllLogs()
+    }
+
+    @GetMapping("/incidents")
+    fun getIncidents(): List<Incident> {
+        return collectorService.getOpenIncidents()
     }
 
     @GetMapping("/incidents/open")

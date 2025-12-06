@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 // Icons from Lucide for a professional look
 import { Gauge, Zap, TrendingDown, Clock, CheckCircle } from 'lucide-react';
@@ -5,8 +7,23 @@ import { Gauge, Zap, TrendingDown, Clock, CheckCircle } from 'lucide-react';
 // --- CONFIGURATION ---
 // This URL must match your Central Collector Service (Port 8080)
 const API_BASE_URL = 'http://localhost:8080/api/v1';
-const MOCK_USER_ID = 'dev-yesaswi-123';
-const MOCK_TOKEN = 'mock-jwt-token-abc123'; // Placeholder for JWT Auth requirement
+
+// Helpers to read/write a (mock) JWT and user id from localStorage.
+// This keeps auth simple for the assignment while still showing a real login flow.
+const getMockUserId = () => (typeof window !== 'undefined' && localStorage.getItem('lm_user')) || 'dev-yesaswi-123';
+const getMockToken = () => (typeof window !== 'undefined' && localStorage.getItem('lm_token')) || 'mock-jwt-token-abc123';
+const setMockAuth = (userId, token) => {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem('lm_user', userId);
+    localStorage.setItem('lm_token', token);
+  }
+};
+const clearMockAuth = () => {
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem('lm_user');
+    localStorage.removeItem('lm_token');
+  }
+};
 
 /**
  * Custom hook for fetching data from the Collector API with state management.
@@ -21,18 +38,41 @@ const useDataFetcher = (endpoint, dependencies = []) => {
     setError(null);
     try {
       // NOTE: We pass the MOCK_TOKEN in the Authorization header to satisfy the JWT Auth requirement
+      // include CORS mode and robust JSON parsing (backend may return empty body)
       const response = await fetch(`${API_BASE_URL}/${endpoint}`, {
+        method: 'GET',
+        mode: 'cors',
         headers: {
-          'Authorization': `Bearer ${MOCK_TOKEN}`, // Satisfies JWT requirement
+          'Authorization': `Bearer ${getMockToken()}`,
           'Content-Type': 'application/json',
         },
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        // attempt to read any error body
+        const txt = await response.text().catch(() => '');
+        throw new Error(`HTTP error ${response.status}${txt ? `: ${txt}` : ''}`);
       }
-      const json = await response.json();
-      setData(json);
+
+      // Some endpoints may return empty body (e.g., 204) or non-JSON; handle gracefully
+      const text = await response.text().catch(() => '');
+      let json = [];
+      if (!text) {
+        json = [];
+      } else {
+        try {
+          json = JSON.parse(text);
+        } catch (parseErr) {
+          console.warn(`Invalid JSON from ${endpoint}:`, text);
+          // if the response is a single object, wrap it; otherwise fallback to empty
+          try {
+            json = eval(`(${text})`); // fallback for non-JSON JS objects — last resort
+          } catch (_e) {
+            json = [];
+          }
+        }
+      }
+      setData(json || []);
     } catch (e) {
       setError(e.message);
       console.error(`Error fetching ${endpoint}:`, e);
@@ -158,9 +198,9 @@ const IssueManagement = ({ incidents, refreshIncidents }) => {
   const handleResolve = async (id) => {
     setIsResolving(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/incidents/${id}/resolve?userId=${MOCK_USER_ID}`, {
+      const response = await fetch(`${API_BASE_URL}/incidents/${id}/resolve?userId=${getMockUserId()}`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${MOCK_TOKEN}` },
+        headers: { 'Authorization': `Bearer ${getMockToken()}` },
       });
 
       if (!response.ok) {
@@ -330,41 +370,74 @@ const RequestExplorer = ({ logs }) => {
 
 // --- AUTH/ROOT COMPONENT (Handles JWT Login Placeholder) ---
 
-const LoginPage = ({ onLogin }) => (
+const LoginPage = ({ onLogin }) => {
+  const userRef = React.useRef(null);
+  const passRef = React.useRef(null);
+
+  const handle = () => {
+    const user = (userRef.current && userRef.current.value) || 'dev-yesaswi-123';
+    // Create a simple mock token; in real deployment replace with real auth flow.
+    const token = `mock-token-${Date.now()}`;
+    setMockAuth(user, token);
+    onLogin && onLogin();
+  };
+
+  return (
     <div className="min-h-screen flex items-center justify-center bg-gray-100">
-        <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-md">
-            <h2 className="text-3xl font-bold text-gray-900 text-center mb-6">Leap Monitoring Login</h2>
-            <p className='text-sm text-gray-500 text-center mb-6'>JWT Authentication Placeholder</p>
-            <div className="space-y-4">
-                <input
-                    type="text"
-                    placeholder="Username (e.g., dev-yesaswi-123)"
-                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                    defaultValue={MOCK_USER_ID}
-                />
-                <input
-                    type="password"
-                    placeholder="Password (Mock)"
-                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                    defaultValue="password"
-                />
-                <button
-                    onClick={onLogin}
-                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-lg shadow-md transition duration-150"
-                >
-                    Login
-                </button>
-            </div>
-            <p className="mt-6 text-center text-sm text-gray-500">
-                Using mock user <code className='text-indigo-600'>{MOCK_USER_ID}</code> for API calls.
-            </p>
+      <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-md">
+        <h2 className="text-3xl font-bold text-gray-900 text-center mb-6">Leap Monitoring Login</h2>
+        <p className='text-sm text-gray-500 text-center mb-6'>JWT Authentication Placeholder</p>
+        <div className="space-y-4">
+          <input
+            ref={userRef}
+            type="text"
+            placeholder="Username (e.g., dev-yesaswi-123)"
+            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+            defaultValue={getMockUserId()}
+          />
+          <input
+            ref={passRef}
+            type="password"
+            placeholder="Password (Mock)"
+            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+            defaultValue="password"
+          />
+          <button
+            onClick={handle}
+            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-lg shadow-md transition duration-150"
+          >
+            Login
+          </button>
         </div>
+        <p className="mt-6 text-center text-sm text-gray-500">
+          Using mock user <code className='text-indigo-600'>{getMockUserId()}</code> for API calls.
+        </p>
+      </div>
     </div>
-);
+  );
+};
 
 const DashboardContent = () => {
   const { data: logs, isLoading: logsLoading, error: logsError } = useDataFetcher('logs');
   const { data: incidents, isLoading: incidentsLoading, error: incidentsError, refresh: refreshIncidents } = useDataFetcher('incidents/open');
+
+  // Health check state: call /health to provide clearer error messages
+  const [healthOk, setHealthOk] = useState(null);
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/health`, { method: 'GET', mode: 'cors' });
+        if (!mounted) return;
+        if (res.ok) setHealthOk(true);
+        else setHealthOk(false);
+      } catch (e) {
+        if (!mounted) return;
+        setHealthOk(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
 
   if (logsLoading || incidentsLoading) {
     return (
@@ -374,13 +447,20 @@ const DashboardContent = () => {
     );
   }
 
-  if (logsError || incidentsError) {
+  if (logsError || incidentsError || healthOk === false) {
+    const logsMsg = logsError || '(no response)';
+    const incidentsMsg = incidentsError || '(no response)';
     return (
         <div className="p-10 bg-red-100 border border-red-400 rounded-lg m-10">
             <h2 className="text-xl font-bold text-red-800">Error Connecting to Collector Backend</h2>
-            <p className="text-red-700 mt-2">Please ensure the Central Collector Service is running on `http://localhost:8080` and MongoDB is running.</p>
-            <p className="text-sm text-red-600 mt-1">Logs Error: {logsError || 'N/A'}</p>
-            <p className="text-sm text-red-600">Incidents Error: {incidentsError || 'N/A'}</p>
+            <p className="text-red-700 mt-2">Please ensure the Central Collector is running at <code className="bg-gray-100 p-1 rounded">http://localhost:8080</code> and MongoDB is running on port <code className="bg-gray-100 p-1 rounded">27017</code>.</p>
+            <p className="text-sm text-red-600 mt-3">Health Check: {healthOk === false ? 'UNREACHABLE' : healthOk === null ? 'Checking...' : 'OK'}</p>
+            <p className="text-sm text-red-600 mt-1">Logs Error: {logsMsg}</p>
+            <p className="text-sm text-red-600">Incidents Error: {incidentsMsg}</p>
+            <div className="mt-4">
+              <button onClick={() => { window.location.reload(); }} className="bg-indigo-600 text-white px-4 py-2 rounded mr-2">Retry</button>
+              <a href="http://localhost:8080/api/v1/health" target="_blank" rel="noreferrer" className="text-indigo-600 underline">Open Health Endpoint</a>
+            </div>
         </div>
     );
   }
@@ -389,17 +469,21 @@ const DashboardContent = () => {
     <div className="min-h-screen bg-gray-50 p-6 sm:p-10">
       <header className="mb-10 border-b pb-4">
         <h1 className="text-4xl font-extrabold text-gray-900">Leap API Observability Platform</h1>
-        <p className="text-gray-500 mt-1">Logged in as: <span className="font-semibold text-indigo-600">{MOCK_USER_ID}</span></p>
+        <p className="text-gray-500 mt-1">Logged in as: <span className="font-semibold text-indigo-600">{getMockUserId()}</span></p>
       </header>
 
       <main className="space-y-12">
         <DashboardWidgets logs={logs} />
+        <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-100">
+          <h3 className="text-xl font-medium text-gray-800 mb-4">Error Rate (recent)</h3>
+          <ErrorRateGraph logs={logs} />
+        </div>
         <IssueManagement incidents={incidents} refreshIncidents={refreshIncidents} />
         <RequestExplorer logs={logs} />
       </main>
 
       <footer className="mt-12 text-center text-sm text-gray-500 pt-6 border-t">
-        Developed by {MOCK_USER_ID} for the Leap Assignment.
+        Developed by {getMockUserId()} for the Leap Assignment.
       </footer>
     </div>
   );
@@ -409,8 +493,72 @@ export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
 
   useEffect(() => {
-    setIsLoggedIn(true);
+    // initialize login state from localStorage
+    const token = (typeof window !== 'undefined') ? localStorage.getItem('lm_token') : null;
+    if (token) setIsLoggedIn(true);
   }, []);
 
-  return isLoggedIn ? <DashboardContent /> : <LoginPage onLogin={() => setIsLoggedIn(true)} />;
+  const handleLogin = () => setIsLoggedIn(true);
+
+  const handleLogout = () => {
+    clearMockAuth();
+    setIsLoggedIn(false);
+    window.location.reload();
+  };
+
+  return isLoggedIn ? (
+    <div>
+      <div className="fixed top-4 right-4">
+        <button onClick={handleLogout} className="bg-red-600 text-white px-3 py-1 rounded">Logout</button>
+      </div>
+      <DashboardContent />
+    </div>
+  ) : (
+    <LoginPage onLogin={handleLogin} />
+  );
+}
+
+// Lightweight error-rate graph (SVG). Shows % of errors per recent time bucket.
+function ErrorRateGraph({ logs = [] }) {
+  const buckets = 30;
+  const now = Date.now();
+  const bucketMs = 60 * 1000;
+  const counts = new Array(buckets).fill(0);
+  const errors = new Array(buckets).fill(0);
+
+  logs.forEach(log => {
+    const t = new Date(log.timestamp).getTime();
+    const diff = Math.floor((now - t) / bucketMs);
+    if (diff >= 0 && diff < buckets) {
+      const idx = buckets - 1 - diff;
+      counts[idx] += 1;
+      if (log.statusCode >= 500) errors[idx] += 1;
+    }
+  });
+
+  const rates = counts.map((c, i) => (c === 0 ? 0 : (errors[i] / c) * 100));
+  const maxRate = Math.max(...rates, 1);
+
+  const width = 700;
+  const height = 120;
+  const step = width / buckets;
+
+  const path = rates.map((r, i) => {
+    const x = i * step + step / 2;
+    const y = height - (r / maxRate) * (height - 10) - 5;
+    return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`;
+  }).join(' ');
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-32">
+      <rect x="0" y="0" width={width} height={height} fill="#f8fafc" rx="6" />
+      <path d={path} fill="none" stroke="#ef4444" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+      {rates.map((r, i) => {
+        const x = i * step + step / 2;
+        const y = height - (r / maxRate) * (height - 10) - 5;
+        return <circle key={i} cx={x} cy={y} r={2.2} fill="#ef4444" />;
+      })}
+      <text x="8" y="14" className="text-xs" fill="#374151">Error % (recent)</text>
+    </svg>
+  );
 }

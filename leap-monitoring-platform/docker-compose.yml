@@ -1,0 +1,91 @@
+services:
+  # MongoDB database for storing logs and incidents
+  mongo:
+    image: mongo:7.0
+    container_name: leap_mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: logs_db
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - leap-network
+
+  # Central Collector microservice (Spring Boot, Kotlin)
+  central-collector:
+    build:
+      context: .
+      dockerfile: ./central-collector/Dockerfile
+    container_name: leap_central_collector
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      - SPRING_DATA_MONGODB_URI=mongodb://mongo:27017/logs_db
+      - SPRING_DATA_MONGODB_DATABASE=logs_db
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - leap-network
+
+  # Tracking Client Demo microservice (Spring Boot, Kotlin)
+  tracking-client-demo:
+    build:
+      context: .
+      dockerfile: ./tracking-client-demo/Dockerfile
+    container_name: leap_tracking_client
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    depends_on:
+      central-collector:
+        condition: service_healthy
+    environment:
+      - SPRING_DATA_MONGODB_URI=mongodb://mongo:27017/logs_db
+      - SPRING_DATA_MONGODB_DATABASE=logs_db
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - leap-network
+
+  # Next.js Dashboard (React frontend)
+  nextjs-dashboard:
+    build:
+      context: ./nextjs-dashboard
+      dockerfile: Dockerfile
+    container_name: leap_dashboard
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      central-collector:
+        condition: service_healthy
+    environment:
+      - PORT=3000
+      - NEXT_TELEMETRY_DISABLED=1
+    networks:
+      - leap-network
+
+volumes:
+  mongo_data:
+    driver: local
+
+networks:
+  leap-network:
+    driver: bridge
