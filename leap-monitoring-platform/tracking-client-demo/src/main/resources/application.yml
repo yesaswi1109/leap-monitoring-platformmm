@@ -1,0 +1,21 @@
+# --- TRACKING CLIENT DEMO CONFIGURATION ---
+
+server:
+  port: 8081 # This service runs on port 8081
+
+# Configuration for the Log Sender service (it tells the client where the Collector is)
+collector:
+  url: http://localhost:8080/api/v1/logs # The Collector service URL
+  service-name: "ORDERS-SERVICE" # Identifier for this specific service
+
+# --- RATE LIMITER CONFIGURATION ---
+monitoring:
+  rateLimit:
+    # Default allowed rate: 100 requests/second (used if no override matches service-name)
+    default-limit-per-second: 100 
+    
+    # List of service-specific limits (Overrides)
+    overrides:
+      # Example override based on assignment document:
+      - service: "INVENTORY-SERVICE" 
+        limit: 120 # Overrides default to 120 req/s for this service

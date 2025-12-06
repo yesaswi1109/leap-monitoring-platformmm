@@ -1,0 +1,29 @@
+# --- CENTRAL COLLECTOR SERVICE CONFIGURATION ---
+
+server:
+  # The Collector runs on port 8080, which is the target for the tracking client
+  port: 8080 
+
+# --- MANDATORY DUAL MONGODB CONFIGURATION ---
+spring:
+  data:
+    mongodb:
+      # 1. Primary DB: Logs Database (for raw, high-volume metrics)
+      primary:
+        # !!! IMPORTANT: Ensure MongoDB is running on localhost:27017
+        uri: mongodb://localhost:27017/logs_db 
+        database: logs_db
+
+      # 2. Secondary DB: Metadata Database (for incidents, users, and config)
+      secondary:
+        # !!! IMPORTANT: Ensure MongoDB is running on localhost:27017
+        uri: mongodb://localhost:27017/metadata_db 
+        database: metadata_db
+
+# --- ALERTING THRESHOLDS ---
+# These values are read by the CollectorService.kt
+alerting:
+  # Rule 1: API latency > 500ms
+  latency-threshold-ms: 500
+  # Rule 2: Status code is 5xx (500 is the minimum)
+  error-status-min: 500
