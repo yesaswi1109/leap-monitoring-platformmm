@@ -24,19 +24,21 @@ const nextConfig = {
     ];
   },
   // Proxy API calls to the API server
-  // Inside Docker: use service name (api-server)
-  // Outside Docker: use localhost
+  // In development: localhost:8080
+  // In production (Vercel): Use NEXT_PUBLIC_BACKEND_URL environment variable
   async rewrites() {
-    const apiHost = process.env.NODE_ENV === 'production' 
-      ? 'http://api-server:8080'  // Docker service name
-      : 'http://localhost:8080';   // Local development
+    // For Vercel: Use environment variable pointing to Codespaces backend
+    // For local dev: Use localhost
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8080'
     
-    return [
-      {
-        source: '/api/:path*',
-        destination: `${apiHost}/api/:path*`,
-      },
-    ];
+    return {
+      beforeFiles: [
+        {
+          source: '/api/:path*',
+          destination: `${backendUrl}/api/:path*`,
+        },
+      ],
+    };
   },
 };
 
