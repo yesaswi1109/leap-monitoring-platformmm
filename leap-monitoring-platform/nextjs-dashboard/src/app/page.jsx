@@ -3,6 +3,15 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 // Icons from Lucide for a professional look
 import { Gauge, Zap, TrendingDown, Clock, CheckCircle } from 'lucide-react';
+import { 
+  loginUser, 
+  setPasswordForUser, 
+  isFirstTimeLogin, 
+  logoutUser, 
+  getCurrentUser, 
+  getJWTToken,
+  initializeAuth 
+} from './auth';
 
 // --- CONFIGURATION ---
 // Support both localhost and container networking
@@ -34,38 +43,20 @@ const getApiBaseUrl = () => {
 // const API_BASE_URL = getApiBaseUrl(); // ❌ WRONG - causes hydration issues
 // Instead, use getApiBaseUrl() inside useEffect or useCallback
 
-// Helpers to read/write a (mock) JWT and user id from localStorage.
-// This keeps auth simple for the assignment while still showing a real login flow.
-// Wrapped with client check to prevent hydration errors
-const getMockUserId = () => {
+// Helpers for authenticated API calls
+const getCurrentUserEmail = () => {
   if (typeof window !== 'undefined') {
-    return localStorage.getItem('lm_user') || 'dev-yesaswi-123';
+    const user = getCurrentUser();
+    return user?.email || 'unknown@leapmonitoring.com';
   }
-  return 'dev-yesaswi-123';
+  return 'unknown@leapmonitoring.com';
 };
 
-const getMockToken = () => {
+const getAuthToken = () => {
   if (typeof window !== 'undefined') {
-    return localStorage.getItem('lm_token') || 'mock-jwt-token-abc123';
+    return getJWTToken() || 'no-token';
   }
-  return 'mock-jwt-token-abc123';
-};
-
-const setMockAuth = (userId, token) => {
-  if (typeof window !== 'undefined') {
-    localStorage.setItem('lm_user', userId);
-    localStorage.setItem('lm_token', token);
-    // Dispatch storage event for cross-tab sync
-    window.dispatchEvent(new Event('storage'));
-  }
-};
-
-const clearMockAuth = () => {
-  if (typeof window !== 'undefined') {
-    localStorage.removeItem('lm_user');
-    localStorage.removeItem('lm_token');
-    window.dispatchEvent(new Event('storage'));
-  }
+  return 'no-token';
 };
 
 /**
@@ -107,7 +98,7 @@ const useDataFetcher = (endpoint, dependencies = [], options = {}) => {
         method: 'GET',
         mode: 'cors',
         headers: {
-          'Authorization': `Bearer ${getMockToken()}`,
+          'Authorization': `Bearer ${getAuthToken()}`,
           'Content-Type': 'application/json',
         },
         // Faster timeout
@@ -281,9 +272,9 @@ const IssueManagement = ({ incidents, refreshIncidents }) => {
     setIsResolving(true);
     try {
       const apiUrl = getApiBaseUrl();
-      const response = await fetch(`${apiUrl}/incidents/${id}/resolve?userId=${getMockUserId()}`, {
+      const response = await fetch(`${apiUrl}/incidents/${id}/resolve?userId=${getCurrentUserEmail()}`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${getMockToken()}` },
+        headers: { 'Authorization': `Bearer ${getAuthToken()}` },
       });
 
       if (!response.ok) {
@@ -454,54 +445,248 @@ const RequestExplorer = ({ logs }) => {
 // --- AUTH/ROOT COMPONENT (Handles JWT Login Placeholder) ---
 
 const LoginPage = ({ onLogin }) => {
-  const userRef = React.useRef(null);
-  const passRef = React.useRef(null);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [error, setError] = useState('');
+  const [isFirstTime, setIsFirstTime] = useState(false);
+  const [step, setStep] = useState('login'); // 'login' or 'setup'
 
-  const handle = async () => {
-    setIsLoggingIn(true);
-    // OPTIMIZATION: Minimal delay to set auth and login instantly
-    const user = (userRef.current && userRef.current.value) || 'dev-yesaswi-123';
-    // Create a simple mock token; in real deployment replace with real auth flow.
-    const token = `mock-token-${Date.now()}`;
-    setMockAuth(user, token);
+  // Check if email exists and is first-time login
+  const handleEmailCheck = async () => {
+    if (!email.trim()) {
+      setError('Please enter an email address');
+      return;
+    }
+
+    // Check if user exists and if it's first-time login
+    const isFirst = isFirstTimeLogin(email);
     
-    // Trigger login immediately - no artificial delays
-    onLogin && onLogin();
-    setIsLoggingIn(false);
+    if (isFirst) {
+      setIsFirstTime(true);
+      setStep('setup');
+      setError('');
+    } else {
+      // Go to password entry
+      setIsFirstTime(false);
+      setError('');
+    }
+  };
+
+  // Handle login with existing password
+  const handleLogin = async () => {
+    if (!password.trim()) {
+      setError('Please enter a password');
+      return;
+    }
+
+    setIsLoggingIn(true);
+    setError('');
+
+    try {
+      const result = loginUser(email, password);
+      
+      if (result.success) {
+        // Successfully logged in
+        onLogin && onLogin();
+      } else {
+        setError(result.error || 'Login failed');
+      }
+    } catch (err) {
+      setError('An error occurred during login');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  // Handle password setup for first-time users
+  const handleSetupPassword = async () => {
+    if (!password.trim()) {
+      setError('Please enter a password');
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      setError('Passwords do not match');
+      return;
+    }
+
+    if (password.length < 6) {
+      setError('Password must be at least 6 characters');
+      return;
+    }
+
+    setIsLoggingIn(true);
+    setError('');
+
+    try {
+      const result = setPasswordForUser(email, password);
+      
+      if (result.success) {
+        setError('');
+        setPassword('');
+        setConfirmPassword('');
+        setStep('login');
+        setIsFirstTime(false);
+        alert(result.message + ' Now you can log in with your email and new password.');
+      } else {
+        setError(result.error || 'Failed to set password');
+      }
+    } catch (err) {
+      setError('An error occurred');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleBackToEmail = () => {
+    setEmail('');
+    setPassword('');
+    setConfirmPassword('');
+    setError('');
+    setStep('login');
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-100">
-      <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-md">
-        <h2 className="text-3xl font-bold text-gray-900 text-center mb-6">Leap Monitoring Login</h2>
-        <p className='text-sm text-gray-500 text-center mb-6'>JWT Authentication Placeholder</p>
-        <div className="space-y-4">
-          <input
-            ref={userRef}
-            type="text"
-            placeholder="Username (e.g., dev-yesaswi-123)"
-            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-            defaultValue={getMockUserId()}
-          />
-          <input
-            ref={passRef}
-            type="password"
-            placeholder="Password (Mock)"
-            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-            defaultValue="password"
-          />
-          <button
-            onClick={handle}
-            disabled={isLoggingIn}
-            className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-400 text-white font-semibold py-3 rounded-lg shadow-md transition duration-150"
-          >
-            {isLoggingIn ? 'Logging in...' : 'Login'}
-          </button>
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 p-4">
+      <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md">
+        <div className="text-center mb-8">
+          <h1 className="text-4xl font-bold text-gray-900 mb-2">Leap Monitoring</h1>
+          <h2 className="text-lg font-semibold text-indigo-600">API Observability Platform</h2>
+          <p className="text-sm text-gray-500 mt-2">Email-based Authentication</p>
         </div>
-        <p className="mt-6 text-center text-sm text-gray-500">
-          Using mock user <code className='text-indigo-600'>{getMockUserId()}</code> for API calls.
-        </p>
+
+        {step === 'login' && (
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="your.email@leapmonitoring.com"
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition"
+                disabled={isLoggingIn}
+                onKeyPress={(e) => e.key === 'Enter' && handleEmailCheck()}
+              />
+              <p className="text-xs text-gray-500 mt-1">Demo users: user1@leapmonitoring.com to user60@leapmonitoring.com</p>
+            </div>
+
+            {!isFirstTime && email && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Enter your password"
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition"
+                  disabled={isLoggingIn}
+                  onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
+                />
+              </div>
+            )}
+
+            {error && (
+              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
+                {error}
+              </div>
+            )}
+
+            <button
+              onClick={isFirstTime ? handleEmailCheck : (email ? handleLogin : handleEmailCheck)}
+              disabled={isLoggingIn || !email}
+              className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-400 text-white font-semibold py-3 rounded-lg shadow-md transition duration-150"
+            >
+              {isLoggingIn ? 'Authenticating...' : (email && !isFirstTime ? 'Login' : 'Continue')}
+            </button>
+
+            {email && (
+              <button
+                onClick={() => {
+                  setEmail('');
+                  setPassword('');
+                  setError('');
+                }}
+                className="w-full text-sm text-indigo-600 hover:text-indigo-700 font-medium py-2"
+              >
+                Change Email
+              </button>
+            )}
+          </div>
+        )}
+
+        {step === 'setup' && (
+          <div className="space-y-4">
+            <div className="bg-blue-50 border border-blue-200 px-4 py-3 rounded-lg">
+              <p className="text-sm text-blue-800 font-medium">First Time Login</p>
+              <p className="text-xs text-blue-700 mt-1">
+                User <span className="font-semibold">{email}</span> exists. Please set your password.
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">New Password</label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="At least 6 characters"
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition"
+                disabled={isLoggingIn}
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Confirm Password</label>
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Re-enter password"
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition"
+                disabled={isLoggingIn}
+                onKeyPress={(e) => e.key === 'Enter' && handleSetupPassword()}
+              />
+            </div>
+
+            {error && (
+              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
+                {error}
+              </div>
+            )}
+
+            <button
+              onClick={handleSetupPassword}
+              disabled={isLoggingIn || !password || !confirmPassword}
+              className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-400 text-white font-semibold py-3 rounded-lg shadow-md transition duration-150"
+            >
+              {isLoggingIn ? 'Setting Password...' : 'Set Password & Continue'}
+            </button>
+
+            <button
+              onClick={handleBackToEmail}
+              className="w-full text-sm text-gray-600 hover:text-gray-700 font-medium py-2"
+            >
+              Back
+            </button>
+          </div>
+        )}
+
+        <div className="mt-8 pt-6 border-t border-gray-200">
+          <details className="text-xs text-gray-600">
+            <summary className="cursor-pointer font-semibold text-gray-700 hover:text-indigo-600">
+              Demo Credentials
+            </summary>
+            <div className="mt-3 space-y-2 bg-gray-50 p-3 rounded-lg">
+              <p><strong>Admin:</strong> admin@leapmonitoring.com / admin123</p>
+              <p><strong>Demo:</strong> demo@leapmonitoring.com / demo123</p>
+              <p><strong>Users:</strong> user1@leapmonitoring.com to user60@leapmonitoring.com</p>
+              <p className="text-gray-500 text-xs mt-2">For first-time users, set your own password and you'll be logged in.</p>
+            </div>
+          </details>
+        </div>
       </div>
     </div>
   );
@@ -597,7 +782,7 @@ const DashboardContent = () => {
     <div className="min-h-screen bg-gray-50 p-6 sm:p-10">
       <header className="mb-10 border-b pb-4">
         <h1 className="text-4xl font-extrabold text-gray-900">Leap API Observability Platform</h1>
-        <p className="text-gray-500 mt-1">Logged in as: <span className="font-semibold text-indigo-600">{getMockUserId()}</span></p>
+        <p className="text-gray-500 mt-1">Logged in as: <span className="font-semibold text-indigo-600">{getCurrentUserEmail()}</span></p>
       </header>
 
       <main className="space-y-12">
@@ -611,7 +796,7 @@ const DashboardContent = () => {
       </main>
 
       <footer className="mt-12 text-center text-sm text-gray-500 pt-6 border-t">
-        Developed by {getMockUserId()} for the Leap Assignment.
+        Leap API Observability Platform • Built for high-concurrency monitoring (60+ users)
       </footer>
     </div>
   );
@@ -622,10 +807,13 @@ export default function App() {
   const [isHydrated, setIsHydrated] = useState(false);
 
   useEffect(() => {
+    // Initialize auth system
+    initializeAuth();
+    
     // OPTIMIZATION: Check localStorage immediately on client mount (prevents hydration mismatch)
     // This is synchronous, so users logged in previously get instant access
-    const token = localStorage.getItem('lm_token');
-    if (token) {
+    const user = getCurrentUser();
+    if (user) {
       setIsLoggedIn(true);
     }
     setIsHydrated(true);
@@ -634,7 +822,7 @@ export default function App() {
   const handleLogin = () => setIsLoggedIn(true);
 
   const handleLogout = () => {
-    clearMockAuth();
+    logoutUser();
     setIsLoggedIn(false);
     // OPTIMIZATION: Instant logout without delay
     window.location.href = '/';
@@ -644,8 +832,8 @@ export default function App() {
   // Only show loading if we need to check (first visit)
   if (!isHydrated) {
     // Check if already logged in to skip loading screen
-    const hasToken = typeof window !== 'undefined' && localStorage.getItem('lm_token');
-    if (!hasToken) {
+    const user = getCurrentUser();
+    if (!user) {
       return (
         <div className="flex justify-center items-center h-screen bg-gray-50">
           <div className="text-indigo-600 font-medium">Loading...</div>

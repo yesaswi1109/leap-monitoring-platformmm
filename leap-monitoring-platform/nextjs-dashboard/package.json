@@ -1,12 +1,13 @@
 {
   "name": "leap-monitoring-dashboard",
   "version": "1.0.0",
-  "description": "Next.js Dashboard for LEAP Monitoring Platform",
+  "description": "Next.js Dashboard for LEAP Monitoring Platform with Email-based Auth",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "export": "next build && next export"
   },
   "dependencies": {
     "lucide-react": "^0.263.1",
