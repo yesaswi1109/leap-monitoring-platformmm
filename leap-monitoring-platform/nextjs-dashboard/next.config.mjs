@@ -23,14 +23,18 @@ const nextConfig = {
       },
     ];
   },
-  // Proxy API calls to the local mock API so remote clients hitting
-  // the public dashboard URL will have API requests forwarded to
-  // the mock API running on the same host (http://localhost:8080).
+  // Proxy API calls to the API server
+  // Inside Docker: use service name (api-server)
+  // Outside Docker: use localhost
   async rewrites() {
+    const apiHost = process.env.NODE_ENV === 'production' 
+      ? 'http://api-server:8080'  // Docker service name
+      : 'http://localhost:8080';   // Local development
+    
     return [
       {
         source: '/api/:path*',
-        destination: 'http://localhost:8080/api/:path*',
+        destination: `${apiHost}/api/:path*`,
       },
     ];
   },

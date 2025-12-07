@@ -1,0 +1,62 @@
+services:
+  # MongoDB database for storing logs and incidents
+  mongo:
+    image: mongo:7.0
+    container_name: leap_mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: logs_db
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - leap-network
+
+  # Mock API server (Node.js)
+  api-server:
+    build:
+      context: ./mock-api
+      dockerfile: Dockerfile
+    container_name: leap_api_server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      - MONGODB_URI=mongodb://mongo:27017/logs_db
+      - PORT=8080
+    networks:
+      - leap-network
+
+  # Next.js Dashboard (React frontend)
+  nextjs-dashboard:
+    build:
+      context: ./nextjs-dashboard
+      dockerfile: Dockerfile
+    container_name: leap_dashboard
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api-server
+    environment:
+      - PORT=3000
+      - NEXT_PUBLIC_API_BASE_URL=http://api-server:8080/api/v1
+    networks:
+      - leap-network
+
+volumes:
+  mongo_data:
+    driver: local
+
+networks:
+  leap-network:
+    driver: bridge

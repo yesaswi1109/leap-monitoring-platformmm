@@ -14,29 +14,11 @@ import {
 } from './auth';
 
 // --- CONFIGURATION ---
-// Support both localhost and container networking
-// NOTE: This MUST be called lazily (not at module load time) to avoid hydration issues
+// SIMPLE: Always use /api proxy from Next.js
+// Next.js will forward requests to the actual backend
 const getApiBaseUrl = () => {
-  // Server-side fallback
-  if (typeof window === 'undefined') {
-    return 'http://localhost:8080/api/v1';
-  }
-  
-  // Client-side: Check environment, then window, then fallback
-  if (typeof window !== 'undefined') {
-    // Check if we're in a Docker container (central-collector hostname)
-    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-      return 'http://localhost:8080/api/v1';
-    }
-    // For container networking (Docker Compose)
-    if (window.location.hostname === '0.0.0.0' || window.location.hostname.includes('leap_dashboard')) {
-      return 'http://central-collector:8080/api/v1';
-    }
-    // For cloud deployments or custom domains
-    return process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8080/api/v1';
-  }
-  
-  return 'http://localhost:8080/api/v1';
+  // Always use the Next.js proxy endpoint - it will route to the backend
+  return '/api';
 };
 
 // NOTE: Call this lazily inside components, not at module level
@@ -88,13 +70,15 @@ const useDataFetcher = (endpoint, dependencies = [], options = {}) => {
         throw new Error('API URL not configured');
       }
 
-      // Minimal backoff: only 500ms delay for first retry (vs 1s before)
-      if (retryAttempt > 0) {
-        const delay = Math.min(500 * Math.pow(1.5, retryAttempt - 1), 2000); // Faster backoff
-        await new Promise(resolve => setTimeout(resolve, delay));
+      // Always use v1 API endpoints with proper limit for logs
+      let fullEndpoint = endpoint;
+      if (endpoint === 'logs' || endpoint === 'v1/logs') {
+        fullEndpoint = 'v1/logs?limit=50'; // Fetch 50 logs for better calculations
+      } else if (!endpoint.startsWith('v1/')) {
+        fullEndpoint = `v1/${endpoint}`; // Ensure v1 prefix for all endpoints
       }
 
-      const response = await fetch(`${apiUrl}/${endpoint}`, {
+      const response = await fetch(`${apiUrl}/${fullEndpoint}`, {
         method: 'GET',
         mode: 'cors',
         headers: {
@@ -694,12 +678,12 @@ const LoginPage = ({ onLogin }) => {
 
 const DashboardContent = () => {
   // OPTIMIZATION: Both fetch in parallel with faster timeouts (Issue #1 & #2 fix)
-  const { data: logs, isLoading: logsLoading, error: logsError } = useDataFetcher('logs', [], { 
+  const { data: logs, isLoading: logsLoading, error: logsError } = useDataFetcher('v1/logs?limit=50', [], { 
     maxRetries: 2, 
     timeout: 5000,
     refreshInterval: 10000 
   });
-  const { data: incidents, isLoading: incidentsLoading, error: incidentsError, refresh: refreshIncidents } = useDataFetcher('incidents/open', [], { 
+  const { data: incidents, isLoading: incidentsLoading, error: incidentsError, refresh: refreshIncidents } = useDataFetcher('v1/incidents', [], { 
     maxRetries: 2, 
     timeout: 5000,
     refreshInterval: 10000 
@@ -719,9 +703,8 @@ const DashboardContent = () => {
     // Non-blocking health check - starts in background, doesn't block dashboard
     const checkHealth = async () => {
       try {
-        const res = await fetch(`${url}/health`, { 
+        const res = await fetch(`/api/v1/health`, { 
           method: 'GET', 
-          mode: 'cors',
           headers: { 'Content-Type': 'application/json' },
           signal: AbortSignal.timeout ? AbortSignal.timeout(3000) : undefined, // Faster timeout
         });
