@@ -1,0 +1,115 @@
+name: Auto Deploy (Render backend + Vercel frontend)
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
+
+      - name: Trigger Render deploy
+        id: render
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          if [ -z "$RENDER_API_KEY" ] || [ -z "$RENDER_SERVICE_ID" ]; then
+            echo "Missing RENDER_API_KEY or RENDER_SERVICE_ID. Set repository secrets and re-run." >&2
+            exit 1
+          fi
+
+          echo "Triggering Render deploy for service: $RENDER_SERVICE_ID"
+          resp=$(curl -s -X POST "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{}')
+
+          deploy_id=$(echo "$resp" | jq -r .id)
+          echo "render response: $resp"
+          if [ -z "$deploy_id" ] || [ "$deploy_id" = "null" ]; then
+            echo "Failed to create Render deploy: $resp" >&2
+            exit 1
+          fi
+
+          echo "Render deploy id: $deploy_id"
+          # Poll for deploy status
+          for i in $(seq 1 30); do
+            status=$(curl -s "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys/${deploy_id}" -H "Authorization: Bearer ${RENDER_API_KEY}" | jq -r .status)
+            echo "[Render] deploy status: $status"
+            if [ "$status" = "succeeded" ]; then
+              break
+            fi
+            if [ "$status" = "failed" ]; then
+              echo "Render deploy failed" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
+          service_json=$(curl -s "https://api.render.com/v1/services/${RENDER_SERVICE_ID}" -H "Authorization: Bearer ${RENDER_API_KEY}")
+          defaultDomain=$(echo "$service_json" | jq -r .defaultDomain)
+          if [ -z "$defaultDomain" ] || [ "$defaultDomain" = "null" ]; then
+            echo "Unable to read Render service domain: $service_json" >&2
+            exit 1
+          fi
+          backend_url="https://${defaultDomain}"
+          echo "backend_url=${backend_url}" >> $GITHUB_OUTPUT
+
+      - name: Create/Update Vercel env var NEXT_PUBLIC_BACKEND_URL
+        id: vercel_env
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          if [ -z "$VERCEL_TOKEN" ] || [ -z "$VERCEL_PROJECT_ID" ]; then
+            echo "Missing VERCEL_TOKEN or VERCEL_PROJECT_ID. Set repository secrets and re-run." >&2
+            exit 1
+          fi
+
+          value="${{ steps.render.outputs.backend_url }}"
+          echo "Setting NEXT_PUBLIC_BACKEND_URL=$value on Vercel project: $VERCEL_PROJECT_ID"
+
+          # Check for existing var
+          vars=$(curl -s -H "Authorization: Bearer ${VERCEL_TOKEN}" "https://api.vercel.com/v9/projects/${VERCEL_PROJECT_ID}/env")
+          exists=$(echo "$vars" | jq -r --arg k "NEXT_PUBLIC_BACKEND_URL" '.envs[]? | select(.key==$k) | .id' || true)
+          if [ -n "$exists" ]; then
+            echo "Updating existing variable id=$exists"
+            curl -s -X PATCH "https://api.vercel.com/v9/projects/${VERCEL_PROJECT_ID}/env/$exists" \
+              -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"value\": \"$value\"}" > /dev/null
+          else
+            echo "Creating new Vercel env var"
+            curl -s -X POST "https://api.vercel.com/v9/projects/${VERCEL_PROJECT_ID}/env" \
+              -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"key\":\"NEXT_PUBLIC_BACKEND_URL\",\"value\":\"$value\",\"target\":[\"preview\",\"production\"]}" > /dev/null
+          fi
+
+      - name: Deploy frontend to Vercel
+        uses: amondnet/vercel-action@v20
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-args: '--prod'
+          working-directory: './nextjs-dashboard'
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Output final URLs
+        run: |
+          echo "Frontend deployed to Vercel (check Vercel dashboard)."
+          echo "Backend URL: ${{ steps.render.outputs.backend_url }}"
