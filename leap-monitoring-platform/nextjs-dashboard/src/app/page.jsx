@@ -5,56 +5,132 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { Gauge, Zap, TrendingDown, Clock, CheckCircle } from 'lucide-react';
 
 // --- CONFIGURATION ---
-// This URL must match your Central Collector Service (Port 8080)
-const API_BASE_URL = 'http://localhost:8080/api/v1';
+// Support both localhost and container networking
+// NOTE: This MUST be called lazily (not at module load time) to avoid hydration issues
+const getApiBaseUrl = () => {
+  // Server-side fallback
+  if (typeof window === 'undefined') {
+    return 'http://localhost:8080/api/v1';
+  }
+  
+  // Client-side: Check environment, then window, then fallback
+  if (typeof window !== 'undefined') {
+    // Check if we're in a Docker container (central-collector hostname)
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+      return 'http://localhost:8080/api/v1';
+    }
+    // For container networking (Docker Compose)
+    if (window.location.hostname === '0.0.0.0' || window.location.hostname.includes('leap_dashboard')) {
+      return 'http://central-collector:8080/api/v1';
+    }
+    // For cloud deployments or custom domains
+    return process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8080/api/v1';
+  }
+  
+  return 'http://localhost:8080/api/v1';
+};
+
+// NOTE: Call this lazily inside components, not at module level
+// const API_BASE_URL = getApiBaseUrl(); // ❌ WRONG - causes hydration issues
+// Instead, use getApiBaseUrl() inside useEffect or useCallback
 
 // Helpers to read/write a (mock) JWT and user id from localStorage.
 // This keeps auth simple for the assignment while still showing a real login flow.
-const getMockUserId = () => (typeof window !== 'undefined' && localStorage.getItem('lm_user')) || 'dev-yesaswi-123';
-const getMockToken = () => (typeof window !== 'undefined' && localStorage.getItem('lm_token')) || 'mock-jwt-token-abc123';
+// Wrapped with client check to prevent hydration errors
+const getMockUserId = () => {
+  if (typeof window !== 'undefined') {
+    return localStorage.getItem('lm_user') || 'dev-yesaswi-123';
+  }
+  return 'dev-yesaswi-123';
+};
+
+const getMockToken = () => {
+  if (typeof window !== 'undefined') {
+    return localStorage.getItem('lm_token') || 'mock-jwt-token-abc123';
+  }
+  return 'mock-jwt-token-abc123';
+};
+
 const setMockAuth = (userId, token) => {
   if (typeof window !== 'undefined') {
     localStorage.setItem('lm_user', userId);
     localStorage.setItem('lm_token', token);
+    // Dispatch storage event for cross-tab sync
+    window.dispatchEvent(new Event('storage'));
   }
 };
+
 const clearMockAuth = () => {
   if (typeof window !== 'undefined') {
     localStorage.removeItem('lm_user');
     localStorage.removeItem('lm_token');
+    window.dispatchEvent(new Event('storage'));
   }
 };
 
 /**
  * Custom hook for fetching data from the Collector API with state management.
+ * Includes retry logic and exponential backoff for high-concurrency scenarios (60+ users).
+ * OPTIMIZED: Aggressive parallel fetching, faster timeouts, minimal retries for login speed.
  */
-const useDataFetcher = (endpoint, dependencies = []) => {
+const useDataFetcher = (endpoint, dependencies = [], options = {}) => {
   const [data, setData] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [retryCount, setRetryCount] = useState(0);
+  
+  // Faster timeouts and retry strategy for better UX
+  const maxRetries = options.maxRetries !== undefined ? options.maxRetries : 2;
+  const fetchTimeout = options.timeout || 5000; // Reduced from 10s to 5s
+  const refreshInterval = options.refreshInterval || 10000; // 10s refresh
 
-  const fetchData = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
+  const fetchData = useCallback(async (retryAttempt = 0) => {
+    if (retryAttempt === 0) {
+      setIsLoading(true);
+      setError(null);
+    }
+
     try {
-      // NOTE: We pass the MOCK_TOKEN in the Authorization header to satisfy the JWT Auth requirement
-      // include CORS mode and robust JSON parsing (backend may return empty body)
-      const response = await fetch(`${API_BASE_URL}/${endpoint}`, {
+      const apiUrl = getApiBaseUrl(); // Get URL lazily
+      
+      if (!apiUrl) {
+        throw new Error('API URL not configured');
+      }
+
+      // Minimal backoff: only 500ms delay for first retry (vs 1s before)
+      if (retryAttempt > 0) {
+        const delay = Math.min(500 * Math.pow(1.5, retryAttempt - 1), 2000); // Faster backoff
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+
+      const response = await fetch(`${apiUrl}/${endpoint}`, {
         method: 'GET',
         mode: 'cors',
         headers: {
           'Authorization': `Bearer ${getMockToken()}`,
           'Content-Type': 'application/json',
         },
+        // Faster timeout
+        signal: AbortSignal.timeout ? AbortSignal.timeout(fetchTimeout) : undefined,
       });
 
       if (!response.ok) {
-        // attempt to read any error body
         const txt = await response.text().catch(() => '');
+        
+        // Only retry on server errors (5xx) or rate limit (429)
+        if ((response.status >= 500 || response.status === 429) && retryAttempt < maxRetries) {
+          console.warn(`API ${response.status}, retrying... (attempt ${retryAttempt + 1}/${maxRetries})`);
+          setRetryCount(retryAttempt + 1);
+          return fetchData(retryAttempt + 1);
+        }
+
         throw new Error(`HTTP error ${response.status}${txt ? `: ${txt}` : ''}`);
       }
 
-      // Some endpoints may return empty body (e.g., 204) or non-JSON; handle gracefully
+      // Clear retry count on success
+      setRetryCount(0);
+
+      // Parse response
       const text = await response.text().catch(() => '');
       let json = [];
       if (!text) {
@@ -64,31 +140,37 @@ const useDataFetcher = (endpoint, dependencies = []) => {
           json = JSON.parse(text);
         } catch (parseErr) {
           console.warn(`Invalid JSON from ${endpoint}:`, text);
-          // if the response is a single object, wrap it; otherwise fallback to empty
-          try {
-            json = eval(`(${text})`); // fallback for non-JSON JS objects — last resort
-          } catch (_e) {
-            json = [];
-          }
+          json = [];
         }
       }
-      setData(json || []);
-    } catch (e) {
-      setError(e.message);
-      console.error(`Error fetching ${endpoint}:`, e);
-    } finally {
+      
+      setData(Array.isArray(json) ? json : (json ? [json] : []));
       setIsLoading(false);
+    } catch (e) {
+      // Network errors or timeout
+      if (retryAttempt < maxRetries) {
+        console.warn(`Fetch error, retrying... (attempt ${retryAttempt + 1}/${maxRetries}):`, e.message);
+        setRetryCount(retryAttempt + 1);
+        return fetchData(retryAttempt + 1);
+      }
+
+      setError(e.message);
+      setIsLoading(false);
+      console.error(`Error fetching ${endpoint} after ${maxRetries} retries:`, e);
     }
-  }, [endpoint, ...dependencies]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [endpoint, maxRetries, fetchTimeout, ...dependencies]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    // Fetch data and refresh every 10 seconds for real-time feel
+    // Initial fetch - NO DELAY for faster dashboard load
     fetchData();
-    const interval = setInterval(fetchData, 10000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
+    
+    // Refresh interval (no jitter on first load for speed)
+    const interval = setInterval(fetchData, refreshInterval);
 
-  return { data, isLoading, error, refresh: fetchData };
+    return () => clearInterval(interval);
+  }, [fetchData, refreshInterval]);
+
+  return { data, isLoading, error, refresh: fetchData, retryCount };
 };
 
 
@@ -198,7 +280,8 @@ const IssueManagement = ({ incidents, refreshIncidents }) => {
   const handleResolve = async (id) => {
     setIsResolving(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/incidents/${id}/resolve?userId=${getMockUserId()}`, {
+      const apiUrl = getApiBaseUrl();
+      const response = await fetch(`${apiUrl}/incidents/${id}/resolve?userId=${getMockUserId()}`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${getMockToken()}` },
       });
@@ -373,13 +456,19 @@ const RequestExplorer = ({ logs }) => {
 const LoginPage = ({ onLogin }) => {
   const userRef = React.useRef(null);
   const passRef = React.useRef(null);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-  const handle = () => {
+  const handle = async () => {
+    setIsLoggingIn(true);
+    // OPTIMIZATION: Minimal delay to set auth and login instantly
     const user = (userRef.current && userRef.current.value) || 'dev-yesaswi-123';
     // Create a simple mock token; in real deployment replace with real auth flow.
     const token = `mock-token-${Date.now()}`;
     setMockAuth(user, token);
+    
+    // Trigger login immediately - no artificial delays
     onLogin && onLogin();
+    setIsLoggingIn(false);
   };
 
   return (
@@ -404,9 +493,10 @@ const LoginPage = ({ onLogin }) => {
           />
           <button
             onClick={handle}
-            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-lg shadow-md transition duration-150"
+            disabled={isLoggingIn}
+            className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-400 text-white font-semibold py-3 rounded-lg shadow-md transition duration-150"
           >
-            Login
+            {isLoggingIn ? 'Logging in...' : 'Login'}
           </button>
         </div>
         <p className="mt-6 text-center text-sm text-gray-500">
@@ -418,28 +508,60 @@ const LoginPage = ({ onLogin }) => {
 };
 
 const DashboardContent = () => {
-  const { data: logs, isLoading: logsLoading, error: logsError } = useDataFetcher('logs');
-  const { data: incidents, isLoading: incidentsLoading, error: incidentsError, refresh: refreshIncidents } = useDataFetcher('incidents/open');
+  // OPTIMIZATION: Both fetch in parallel with faster timeouts (Issue #1 & #2 fix)
+  const { data: logs, isLoading: logsLoading, error: logsError } = useDataFetcher('logs', [], { 
+    maxRetries: 2, 
+    timeout: 5000,
+    refreshInterval: 10000 
+  });
+  const { data: incidents, isLoading: incidentsLoading, error: incidentsError, refresh: refreshIncidents } = useDataFetcher('incidents/open', [], { 
+    maxRetries: 2, 
+    timeout: 5000,
+    refreshInterval: 10000 
+  });
 
-  // Health check state: call /health to provide clearer error messages
+  // Health check state: call /health asynchronously (non-blocking - Issue #1 fix)
   const [healthOk, setHealthOk] = useState(null);
+  const [apiUrl, setApiUrl] = useState(null);
+
   useEffect(() => {
     let mounted = true;
-    (async () => {
+    
+    // Get API URL lazily
+    const url = getApiBaseUrl();
+    setApiUrl(url);
+
+    // Non-blocking health check - starts in background, doesn't block dashboard
+    const checkHealth = async () => {
       try {
-        const res = await fetch(`${API_BASE_URL}/health`, { method: 'GET', mode: 'cors' });
+        const res = await fetch(`${url}/health`, { 
+          method: 'GET', 
+          mode: 'cors',
+          headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout ? AbortSignal.timeout(3000) : undefined, // Faster timeout
+        });
         if (!mounted) return;
         if (res.ok) setHealthOk(true);
         else setHealthOk(false);
       } catch (e) {
         if (!mounted) return;
+        console.warn('Health check failed:', e.message);
         setHealthOk(false);
       }
-    })();
-    return () => { mounted = false; };
+    };
+    
+    // Check health but don't wait for it
+    checkHealth();
+    const interval = setInterval(checkHealth, 30000); // Check health every 30s
+    return () => { 
+      mounted = false; 
+      clearInterval(interval);
+    };
   }, []);
 
-  if (logsLoading || incidentsLoading) {
+  // OPTIMIZATION: Show dashboard immediately with partial data (Issue #1 fix)
+  // Only show loading if BOTH logs and incidents are loading
+  if ((logsLoading || incidentsLoading) && !logs.length && !incidents.length) {
     return (
       <div className="flex justify-center items-center h-screen text-xl font-medium text-indigo-600">
         Loading Observability Data...
@@ -447,19 +569,25 @@ const DashboardContent = () => {
     );
   }
 
-  if (logsError || incidentsError || healthOk === false) {
+  // OPTIMIZATION: Show error only if health check explicitly fails and we have no data (Issue #2 fix)
+  if ((logsError && !logs.length && incidentsError && !incidents.length) && healthOk === false) {
     const logsMsg = logsError || '(no response)';
     const incidentsMsg = incidentsError || '(no response)';
+    const displayUrl = apiUrl || getApiBaseUrl();
+    
     return (
-        <div className="p-10 bg-red-100 border border-red-400 rounded-lg m-10">
+        <div className="p-10 bg-red-100 border border-red-400 rounded-lg m-10 mt-20">
             <h2 className="text-xl font-bold text-red-800">Error Connecting to Collector Backend</h2>
-            <p className="text-red-700 mt-2">Please ensure the Central Collector is running at <code className="bg-gray-100 p-1 rounded">http://localhost:8080</code> and MongoDB is running on port <code className="bg-gray-100 p-1 rounded">27017</code>.</p>
-            <p className="text-sm text-red-600 mt-3">Health Check: {healthOk === false ? 'UNREACHABLE' : healthOk === null ? 'Checking...' : 'OK'}</p>
-            <p className="text-sm text-red-600 mt-1">Logs Error: {logsMsg}</p>
-            <p className="text-sm text-red-600">Incidents Error: {incidentsMsg}</p>
-            <div className="mt-4">
-              <button onClick={() => { window.location.reload(); }} className="bg-indigo-600 text-white px-4 py-2 rounded mr-2">Retry</button>
-              <a href="http://localhost:8080/api/v1/health" target="_blank" rel="noreferrer" className="text-indigo-600 underline">Open Health Endpoint</a>
+            <p className="text-red-700 mt-2">
+              The application is trying to connect to: <code className="bg-gray-200 p-1 rounded font-mono text-sm">{displayUrl}</code>
+            </p>
+            <p className="text-red-700 mt-2">Please ensure the Central Collector is running at this address.</p>
+            <p className="text-sm text-red-600 mt-3">Health Check: {healthOk === false ? '❌ UNREACHABLE' : healthOk === null ? '⏳ Checking...' : '✅ OK'}</p>
+            {logsError && <p className="text-sm text-red-600 mt-1">Logs Error: {logsMsg}</p>}
+            {incidentsError && <p className="text-sm text-red-600">Incidents Error: {incidentsMsg}</p>}
+            <div className="mt-4 space-x-3">
+              <button onClick={() => { window.location.reload(); }} className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded transition">Retry</button>
+              <a href={`${displayUrl}/health`} target="_blank" rel="noreferrer" className="text-indigo-600 underline">Test API Endpoint</a>
             </div>
         </div>
     );
@@ -491,11 +619,16 @@ const DashboardContent = () => {
 
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [isHydrated, setIsHydrated] = useState(false);
 
   useEffect(() => {
-    // initialize login state from localStorage
-    const token = (typeof window !== 'undefined') ? localStorage.getItem('lm_token') : null;
-    if (token) setIsLoggedIn(true);
+    // OPTIMIZATION: Check localStorage immediately on client mount (prevents hydration mismatch)
+    // This is synchronous, so users logged in previously get instant access
+    const token = localStorage.getItem('lm_token');
+    if (token) {
+      setIsLoggedIn(true);
+    }
+    setIsHydrated(true);
   }, []);
 
   const handleLogin = () => setIsLoggedIn(true);
@@ -503,13 +636,28 @@ export default function App() {
   const handleLogout = () => {
     clearMockAuth();
     setIsLoggedIn(false);
-    window.location.reload();
+    // OPTIMIZATION: Instant logout without delay
+    window.location.href = '/';
   };
+
+  // OPTIMIZATION: Skip loading screen for returning users (already have token)
+  // Only show loading if we need to check (first visit)
+  if (!isHydrated) {
+    // Check if already logged in to skip loading screen
+    const hasToken = typeof window !== 'undefined' && localStorage.getItem('lm_token');
+    if (!hasToken) {
+      return (
+        <div className="flex justify-center items-center h-screen bg-gray-50">
+          <div className="text-indigo-600 font-medium">Loading...</div>
+        </div>
+      );
+    }
+  }
 
   return isLoggedIn ? (
     <div>
-      <div className="fixed top-4 right-4">
-        <button onClick={handleLogout} className="bg-red-600 text-white px-3 py-1 rounded">Logout</button>
+      <div className="fixed top-4 right-4 z-50">
+        <button onClick={handleLogout} className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg shadow-md transition">Logout</button>
       </div>
       <DashboardContent />
     </div>

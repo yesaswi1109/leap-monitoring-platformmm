@@ -15,6 +15,7 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_PUBLIC_API_BASE_URL=http://central-collector:8080/api/v1
 
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next ./.next
@@ -26,4 +27,5 @@ EXPOSE 3000
 HEALTHCHECK --interval=10s --timeout=5s --retries=5 \
   CMD wget --quiet --tries=1 --spider http://localhost:3000 || exit 1
 
-CMD ["npm", "run", "start"]
+# Run with proper shell to allow env variables
+CMD ["sh", "-c", "npm run start"]
