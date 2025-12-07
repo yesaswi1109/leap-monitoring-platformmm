@@ -1,0 +1,13 @@
+# Ignore build artifacts and local development files
+**/build/
+**/.gradle/
+**/out/
+**/.idea/
+**/.vscode/
+**/node_modules/
+**/.next/
+**/dist/
+*.jar
+*.war
+*.log
+.DS_Store
